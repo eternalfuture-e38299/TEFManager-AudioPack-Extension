@@ -1,0 +1,13 @@
+{
+  "type": "Module",
+  "file": "audiopack_extension.tefpkg",
+  "icon": {
+    "type": "Default"
+  },
+  "plugins": {
+    "type": "NULL"
+  },
+  "tefkernel": {
+    "minVersion": "1.3.0"
+  }
+}

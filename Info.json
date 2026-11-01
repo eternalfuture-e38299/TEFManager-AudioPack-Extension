@@ -1,0 +1,15 @@
+{
+  "pkgId": "eternal.future.audiopackextension",
+  "name": "AudioPack Extension",
+  "author": "eternalfuture-e38299",
+  "description": "[模块介绍]\n 兼容 Terraria 创意工坊音乐包（Steam Workshop）的自动替换模块。\n\n[来源]\n- 本模块是基于 TEFManager-MusicPack-Extension（https://github.com/lzup333/TEFManager-MusicPack-Extension）的重写版本。\n- 特别感谢 qingshemg（https://github.com/qingqing114514/qingshemg）的早期探索与启发。\n\n[说明]\n- 音频解码依赖安卓系统解码器：音乐支持 ogg / mp3 / wav，音效在此基础上额外支持 xnb。\n- 音频文件过大或音效包条目过多时，可能需要等待一会才能进入游戏。",
+  "version": "2.0.0",
+  "versionCode": 200,
+  "dependence": [],
+  "support": {
+    "android": {
+      "arm64": true,
+      "arm": true
+    }
+  }
+}
