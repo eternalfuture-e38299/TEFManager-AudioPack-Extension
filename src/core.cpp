@@ -219,11 +219,11 @@ static bool init_module(module_entry_t* entry) {
 
 static bool cleanup_module(module_entry_t* entry) {
     (void)entry;
-    if (g_music_voice >= 0) {
-        terraria_audio_manager_stop(g_music_voice);
-        g_music_voice = -1;
-    }
-    AudioManager::Instance().Clear();
+    /* 官方扩展模块的机制：内核在初始化完成、签名校验通过后会删除模块包
+     * 并调用 cleanup_module 释放 module_entry。此时模块代码与音频数据仍需
+     * 继续工作（hook 已装在游戏方法上），所以这里不能停止播放或清理音源，
+     * 否则整个模块会被“初始化完就卸载”，替换音效全部失效。
+     * 真正的释放交给进程退出。 */
     return true;
 }
 
