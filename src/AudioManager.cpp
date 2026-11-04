@@ -39,7 +39,7 @@ namespace {
 constexpr size_t kThreads = 16;
 
 /**
- * @brief 读取 audio_packs/config.json，按 priority 升序返回条目。
+ * @brief 读取 private_dir/config.json，按 priority 升序填充 entries。
  *
  * config.json 格式：
  * [
@@ -48,15 +48,18 @@ constexpr size_t kThreads = 16;
  * ]
  *
  * 字段缺省值：enable=true, priority=0, type=0
- * 文件不存在或解析失败时返回空 vector。
+ * file 相对 audio_packs/ 解析（也接受 "audio_packs/PackA.zip" 这种写法）。
+ *
+ * @return 配置文件存在且成功解析返回 true；打开失败或 JSON 非法返回 false。
+ *         enable=false 的条目会被跳过，missing 的文件只告警不启用。
  */
-std::vector<AudioPackEntry> LoadConfig(const std::filesystem::path& cfg_path) {
-    std::vector<AudioPackEntry> entries;
-
+bool LoadConfig(const std::filesystem::path& cfg_path,
+                const std::filesystem::path& packs_dir,
+                std::vector<AudioPackEntry>& entries) {
     std::ifstream file(cfg_path);
     if (!file.is_open()) {
-        LOGW("config.json not found: %s", cfg_path.string().c_str());
-        return entries;
+        LOGE("config.json open failed: %s", cfg_path.string().c_str());
+        return false;
     }
 
     try {
@@ -64,10 +67,9 @@ std::vector<AudioPackEntry> LoadConfig(const std::filesystem::path& cfg_path) {
         file >> j;
         if (!j.is_array()) {
             LOGE("config.json root must be an array");
-            return entries;
+            return false;
         }
 
-        const auto base_dir = cfg_path.parent_path();
         for (const auto& item : j) {
             if (!item.value("enable", true)) continue;
 
@@ -75,19 +77,28 @@ std::vector<AudioPackEntry> LoadConfig(const std::filesystem::path& cfg_path) {
             const auto rel = item.value("file", "");
             if (rel.empty()) continue;
 
-            e.file = (base_dir / rel).string();
-            e.priority = item.value("priority", 0);
-            e.type = static_cast<AudioPackType>(item.value("type", 0));
-
-            if (!std::filesystem::is_regular_file(e.file)) {
-                LOGW("config: file missing: %s", e.file.c_str());
+            /* 标准约定：file 相对 audio_packs/。
+             * 兼容两种常见写法：纯文件名，或带 audio_packs/ 前缀。 */
+            auto path = packs_dir / rel;
+            if (!std::filesystem::is_regular_file(path)) {
+                const auto alt = packs_dir / std::filesystem::path(rel).filename();
+                if (std::filesystem::is_regular_file(alt)) path = alt;
+            }
+            if (!std::filesystem::is_regular_file(path)) {
+                LOGW("config: pack not found: %s (resolved %s)",
+                     rel.c_str(), path.string().c_str());
                 continue;
             }
+
+            e.file = path.string();
+            e.priority = item.value("priority", 0);
+            e.type = static_cast<AudioPackType>(item.value("type", 0));
             entries.push_back(std::move(e));
         }
     } catch (const std::exception& ex) {
         LOGE("config.json parse error: %s", ex.what());
         entries.clear();
+        return false;
     }
 
     /* priority 升序；同 priority 按文件名，保证结果稳定 */
@@ -95,7 +106,7 @@ std::vector<AudioPackEntry> LoadConfig(const std::filesystem::path& cfg_path) {
         if (a.priority != b.priority) return a.priority < b.priority;
         return a.file < b.file;
     });
-    return entries;
+    return true;
 }
 
 /**
@@ -122,19 +133,31 @@ std::vector<AudioPackEntry> ScanDirectory(const std::string& dir) {
 }
 
 std::vector<AudioPackEntry> ScanPacks(const std::string& dir) {
-    const auto cfg_path = std::filesystem::path(dir).parent_path() / "config.json";
-    auto entries = LoadConfig(cfg_path);
-    if (!entries.empty()) {
-        LOGI("config.json loaded: %zu packs", entries.size());
-        for (const auto&[file, priority, type] : entries) {
-            LOGI("  pack priority=%d type=%d file=%s",
-                 priority, static_cast<int>(type), file.c_str());
-        }
+    const std::filesystem::path packs_dir(dir);
+    /* 管理器约定：config.json 在 private_dir，zip 在 private_dir/audio_packs/ */
+    const auto cfg_path = packs_dir.parent_path() / "config.json";
+
+    /* 只有配置文件不存在时才回退到目录扫描。
+     * 配置存在但解析失败/条目无效时保持空：否则会把玩家禁用的包全部重新启用。 */
+    if (!std::filesystem::is_regular_file(cfg_path)) {
+        LOGW("config.json missing: %s, scanning directory", cfg_path.string().c_str());
+        auto entries = ScanDirectory(dir);
+        LOGI("directory scan: %zu packs", entries.size());
         return entries;
     }
-    LOGW("config.json empty or missing, falling back to directory scan");
-    entries = ScanDirectory(dir);
-    LOGI("directory scan: %zu packs", entries.size());
+
+    std::vector<AudioPackEntry> entries;
+    if (!LoadConfig(cfg_path, packs_dir, entries)) {
+        LOGE("config.json invalid, no audio pack loaded");
+        return {};
+    }
+    LOGI("config.json loaded: %zu packs", entries.size());
+    for (const auto& e : entries) {
+        LOGI("  pack priority=%d type=%d file=%s",
+             e.priority, static_cast<int>(e.type), e.file.c_str());
+    }
+    if (entries.empty())
+        LOGW("config.json has no enabled pack");
     return entries;
 }
 

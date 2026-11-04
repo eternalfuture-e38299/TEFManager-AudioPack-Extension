@@ -27,6 +27,11 @@
 #include "tefkernel-cpp-wrapper/patchlib/type.hpp"
 #include "tefkernel-cpp-wrapper/patchlib/method.hpp"
 #include "tefkernel-cpp-wrapper/patchlib/field.hpp"
+#include "tefkernel-cpp-wrapper/patchlib/property.hpp"
+
+#include "tefkernel/patchlib/field.h"
+#include "tefkernel/patchlib/property.h"
+#include "tefkernel/patchlib/method.h"
 
 #include <chrono>
 #include <filesystem>
@@ -43,7 +48,23 @@ static constexpr module_info_t g_module_info = {
 };
 
 static patch_handle_t g_f_soundVol = nullptr, g_f_musicVol = nullptr;
+/* 手机端 Main.soundVolume / musicVolume 是静态属性，字段不存在时用 getter 兜底 */
+static patch_handle_t g_m_soundVol = nullptr, g_m_musicVol = nullptr;
 static int g_volfields_ok = 0;
+
+static bool ReadStaticFloat(patch_handle_t field, patch_handle_t getter, float *out) {
+    if (patchlib_is_valid(field)) {
+        patchlib_field_get_value(field, nullptr, out);
+        return true;
+    }
+    if (patchlib_is_valid(getter)) {
+        float v = 0.0f;
+        if (!patchlib_method_invoke_args(getter, nullptr, &v, nullptr)) return false;
+        *out = v;
+        return true;
+    }
+    return false;
+}
 static int g_music_voice = -1;
 static volatile float g_music_vol = 1.0f;
 static volatile float g_sound_vol = 1.0f;
@@ -61,9 +82,9 @@ static const MusicNameEntry* MusicNameOf(const int id) {
 static void RefreshVolumes() {
     if (!g_volfields_ok) return;
     float v = 0.0f;
-    patchlib_field_get_value(g_f_soundVol, nullptr, &v);
+    if (!ReadStaticFloat(g_f_soundVol, g_m_soundVol, &v)) return;
     g_sound_vol = v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
-    patchlib_field_get_value(g_f_musicVol, nullptr, &v);
+    if (!ReadStaticFloat(g_f_musicVol, g_m_musicVol, &v)) return;
     g_music_vol = v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
 }
 
@@ -121,6 +142,8 @@ static bool SfxPrefix(patch_handle_t instance, void** args,
     (void)instance; (void)sig; (void)result;
     if (!args || !args[0]) return false;
     const int type = *static_cast<int *>(args[0]);
+    const int x = args[1] ? *static_cast<int *>(args[1]) : -1;
+    const int y = args[2] ? *static_cast<int *>(args[2]) : -1;
     const int style = args[3] ? *static_cast<int *>(args[3]) : 1;
     float vol = 1.0f;
     if (args[4]) {
@@ -133,7 +156,9 @@ static bool SfxPrefix(patch_handle_t instance, void** args,
 
     const AudioClip* clip = AudioManager::Instance().FindSfx(type, style);
     if (!clip) return false;
-    return terraria_audio_manager_play(const_cast<terraria_audio_t *>(&clip->desc), vol, 1.0f) >= 0;
+    /* 按世界坐标播放：距离衰减与原版一致，超出 2500 像素返回 -1（不发声） */
+    return terraria_audio_manager_play_at(const_cast<terraria_audio_t *>(&clip->desc), vol, 1.0f,
+                                          static_cast<float>(x), static_cast<float>(y)) >= 0;
 }
 
 static bool init_module(module_entry_t* entry) {
@@ -146,13 +171,26 @@ static bool init_module(module_entry_t* entry) {
 
     AudioManager::Instance().LoadAllBlocking(packs_dir.string());
 
+    // 解析音量字段：PC 是静态字段，手机端是静态属性
     const TEFKernel::PatchLib::Type Main("Terraria", "Main");
     g_f_soundVol = Main.GetField("soundVolume").GetHandle();
     g_f_musicVol = Main.GetField("musicVolume").GetHandle();
-    g_volfields_ok = patchlib_is_valid(g_f_soundVol) && patchlib_is_valid(g_f_musicVol);
-    LOGI("vol fields: sound=%d music=%d",
+    if (!patchlib_is_valid(g_f_soundVol) || !patchlib_is_valid(g_f_musicVol)) {
+        if (const auto p = Main.GetProperty("soundVolume")) {
+            g_m_soundVol = patchlib_property_get_get_method(p.GetHandle());
+        }
+        if (const auto p = Main.GetProperty("musicVolume")) {
+            g_m_musicVol = patchlib_property_get_get_method(p.GetHandle());
+        }
+    }
+    g_volfields_ok = (patchlib_is_valid(g_f_soundVol) || patchlib_is_valid(g_m_soundVol)) &&
+                     (patchlib_is_valid(g_f_musicVol) || patchlib_is_valid(g_m_musicVol));
+    LOGI("vol fields: sound(f=%d,m=%d) music(f=%d,m=%d) ok=%d",
          static_cast<int>(patchlib_is_valid(g_f_soundVol)),
-         static_cast<int>(patchlib_is_valid(g_f_musicVol)));
+         static_cast<int>(patchlib_is_valid(g_m_soundVol)),
+         static_cast<int>(patchlib_is_valid(g_f_musicVol)),
+         static_cast<int>(patchlib_is_valid(g_m_musicVol)),
+         g_volfields_ok);
 
     const TEFKernel::PatchLib::Type LAS("Terraria.Audio", "LegacyAudioSystem");
     if (const auto m = LAS.GetMethod("UpdateCommonTrack"); m) {
