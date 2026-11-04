@@ -33,13 +33,13 @@
 
 namespace {
 
-constexpr auto MUSIC_PREFIX = "Content/Music/Music_";
-constexpr auto SOUNDS_PREFIX = "Content/Sounds/";
+constexpr auto MUSIC_TAG = "Music_";
 
 int ParseMusicId(const std::string& name) {
-    auto pos = name.find(MUSIC_PREFIX);
+    /* 允许 Music_ 出现在任意层级（Content/Music/ 不是硬性要求，与 MusicPack 一致） */
+    auto pos = name.find(MUSIC_TAG);
     if (pos == std::string::npos) return -1;
-    pos += std::strlen(MUSIC_PREFIX);
+    pos += std::strlen(MUSIC_TAG);
     int v = 0; bool any = false;
     while (pos < name.size() && name[pos] >= '0' && name[pos] <= '9') {
         v = v * 10 + (name[pos] - '0'); ++pos; any = true;
@@ -112,7 +112,8 @@ bool AudioPack::BuildZipIndex() {
         int type = -1, style = -1;
         bool is_sfx = false;
 
-        if (mid < 0 && name.starts_with(SOUNDS_PREFIX)) {
+        /* 允许 .../Sounds/ 或 Sounds/，不强制 Content/ 前缀 */
+        if (mid < 0 && name.find("Sounds/") != std::string::npos) {
             is_sfx = ResolveSfxName(name, type, style);
         }
 
