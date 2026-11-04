@@ -126,8 +126,17 @@ static bool MusicPrefix(patch_handle_t instance, void** args,
     /* 接管期间压掉原版这一路（只在这一首被接管时压） */
     if (args[2]) *static_cast<float *>(args[2]) = 0.0f;
 
+    /* 同一首已在播：跟随游戏音量实时调整；拉到 0 就停掉，避免"静音了还在响" */
+    if (g_music_voice >= 0) {
+        if (g_music_vol <= 0.0f) {
+            terraria_audio_manager_stop(g_music_voice);
+            g_music_voice = -1;
+            return false;
+        }
+        terraria_audio_manager_set_volume(g_music_voice, g_music_vol);
+        return false;
+    }
     if (g_music_vol <= 0.0f) return false;
-    if (g_music_voice >= 0) return false;   // 同一首已在播，别重启
 
     g_music_voice = terraria_audio_manager_play(
         const_cast<terraria_audio_t *>(&clip->desc), g_music_vol, 1.0f);
@@ -210,12 +219,11 @@ static bool init_module(module_entry_t* entry) {
 
 static bool cleanup_module(module_entry_t* entry) {
     (void)entry;
-    /*if (g_music_voice >= 0) {
+    if (g_music_voice >= 0) {
         terraria_audio_manager_stop(g_music_voice);
         g_music_voice = -1;
     }
     AudioManager::Instance().Clear();
-    */
     return true;
 }
 

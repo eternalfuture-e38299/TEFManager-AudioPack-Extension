@@ -30,13 +30,16 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <thread>
 #include <vector>
 
 #include "libs/json.hpp"
 
 namespace {
 
-constexpr size_t kThreads = 16;
+/* 并发解码线程数：按 CPU 核数折半，最多 8。
+ * 每个线程都会整包解码到内存，16 线程在手机上会造成明显的内存/CPU 峰值。 */
+constexpr size_t kMaxThreads = 8;
 
 /**
  * @brief 读取 private_dir/config.json，按 priority 升序填充 entries。
@@ -175,7 +178,10 @@ void AudioManager::LoadAllBlocking(const std::string& packs_dir) {
         return;
     }
 
-    ThreadPool pool(kThreads);
+    size_t threads = std::thread::hardware_concurrency();
+    if (threads == 0) threads = 4;
+    threads = std::min(threads / 2 + 1, kMaxThreads);
+    ThreadPool pool(threads);
     std::vector<std::future<std::unique_ptr<AudioPack>>> futures;
     futures.reserve(entries.size());
 
@@ -196,7 +202,14 @@ void AudioManager::LoadAllBlocking(const std::string& packs_dir) {
      */
     std::vector<std::unique_ptr<AudioPack>> built;
     for (auto& f : futures) {
-        if (auto p = f.get(); p && p->Size() > 0) built.push_back(std::move(p));
+        try {
+            if (auto p = f.get(); p && p->Size() > 0) built.push_back(std::move(p));
+        } catch (const std::exception& ex) {
+            /* 单个包解码时抛异常（如 bad_alloc）不应让整个模块初始化失败 */
+            LOGE("audio pack decode failed: %s", ex.what());
+        } catch (...) {
+            LOGE("audio pack decode failed: unknown exception");
+        }
     }
 
     std::lock_guard lock(_mtx);

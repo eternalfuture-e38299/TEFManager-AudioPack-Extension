@@ -26,8 +26,10 @@
 #include "Log.hpp"
 #include "libs/miniz.h"
 
+#include <chrono>
 #include <cstring>
 #include <string_view>
+#include <thread>
 
 namespace {
 
@@ -43,7 +45,15 @@ int ParseMusicId(const std::string& name) {
         v = v * 10 + (name[pos] - '0'); ++pos; any = true;
     }
     if (!any) return -1;
-    if (const std::string_view rest(name.data() + pos, name.size() - pos); rest != ".ogg" && rest != ".mp3" && rest != ".wav") return -1;
+    /* 扩展名大小写不敏感：管理器不保证玩家导入的包内文件名规范 */
+    std::string_view rest(name.data() + pos, name.size() - pos);
+    auto ext_is = [&rest](const char *ext) {
+        if (rest.size() != std::strlen(ext)) return false;
+        for (size_t i = 0; i < rest.size(); ++i)
+            if (static_cast<char>(rest[i] | 0x20) != static_cast<char>(ext[i] | 0x20)) return false;
+        return true;
+    };
+    if (!ext_is(".ogg") && !ext_is(".mp3") && !ext_is(".wav")) return -1;
     return v;
 }
 
@@ -73,6 +83,10 @@ const AudioClip* AudioPack::FindSfx(const int type, const int style) const {
 }
 
 void AudioPack::Clear() {
+    /* 内核的 stop 是异步的：回调线程可能还在读 pcm_data。
+     * 先统一请求停止，跨过一个回调周期后再注销 + 释放，避免悬垂指针。 */
+    for (const auto& c : _clips) terraria_audio_manager_stop_all(&c->desc);
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
     for (const auto& c : _clips) terraria_audio_manager_unregister(&c->desc);
     _clips.clear();
     _music_lookup.clear();
