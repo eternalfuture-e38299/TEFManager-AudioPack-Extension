@@ -21,30 +21,24 @@
  *******************************************************************************/
 
 #include "SfxNameResolver.hpp"
-#include "SfxNameTable.hpp"
+#include "SfxNameFamilies.h"
 
+#include <string>
 #include <string_view>
-#include <unordered_map>
 
 namespace {
-    constexpr std::string_view kSoundsPrefix = "Content/Sounds/";
-
     std::string_view Basename(const std::string_view path) {
         const auto pos = path.find_last_of('/');
         return pos == std::string_view::npos ? path : path.substr(pos + 1);
     }
 
-    std::string_view StripExt(const std::string_view name) {
-        for (std::string_view ext: {".xnb", ".ogg", ".mp3", ".wav", ".pcm"}) {
-            if (name.size() > ext.size() &&
-                name.substr(name.size() - ext.size()) == ext) {
-                return name.substr(0, name.size() - ext.size());
-            }
-        }
-        return name;
+    /* 去掉任意扩展名（不限定大小写/白名单） */
+    std::string_view StripExt(std::string_view name) {
+        const auto dot = name.find_last_of('.');
+        return dot == std::string_view::npos ? name : name.substr(0, dot);
     }
 
-    int ParsePureDigits(const std::string_view &s) {
+    int ParsePureDigits(const std::string_view s) {
         if (s.empty()) return -1;
         int v = 0;
         for (const char c: s) {
@@ -52,6 +46,21 @@ namespace {
             v = v * 10 + (c - '0');
         }
         return v;
+    }
+
+    /* 与 SoundID const 名不一致的常见写法（归一化后） */
+    struct NameAlias { const char *name; int type; };
+    constexpr NameAlias kAliases[] = {
+        {"dooropened", 8},
+        {"doorclose", 9},
+        {"dooropen", 8},
+    };
+
+    bool LookupAlias(const std::string &norm, int &type) {
+        for (const auto &a: kAliases) {
+            if (norm == a.name) { type = a.type; return true; }
+        }
+        return false;
     }
 
     bool ParseDigitsPair(std::string_view s, int &type, int &style) {
@@ -70,93 +79,43 @@ namespace {
         style = st;
         return true;
     }
-
-    const std::unordered_map<std::string_view, int> &NameToId() {
-        static const auto kMap = [] {
-            std::unordered_map<std::string_view, int> m;
-            m.reserve(kSfxNameTableSize * 2);
-            for (const auto &[name, id]: kSfxNameTable) m.emplace(name, id);
-            return m;
-        }();
-        return kMap;
-    }
-
-    struct VariantPrefix {
-        std::string_view prefix;
-        int base_type;
-    };
-
-    constexpr VariantPrefix kVariants[] = {
-        {.prefix = "NPC_Hit_", .base_type = 3},
-        {.prefix = "NPC_Death_", .base_type = 4},
-        {.prefix = "NPCDeath", .base_type = 4},
-        {.prefix = "NPCHit", .base_type = 3},
-        {.prefix = "Item", .base_type = 2},
-    };
-
-    bool TryVariant(const std::string_view &base, int &type, int &style) {
-        for (const auto &[prefix, base_type]: kVariants) {
-            if (base.size() <= prefix.size()) continue;
-            if (base.substr(0, prefix.size()) != prefix) continue;
-
-            auto rest = base.substr(prefix.size());
-            /* 跳过可选的下划线：Item_11 / Item11 都接受 */
-            if (!rest.empty() && rest.front() == '_') rest.remove_prefix(1);
-
-            /* 变体名后面可能还有 _0 / _1 这种多段后缀，先只取第一段数字 */
-            const auto us = rest.find('_');
-            auto digits = (us == std::string_view::npos) ? rest : rest.substr(0, us);
-
-            const int n = ParsePureDigits(digits);
-            if (n < 0) continue;
-            type = base_type;
-            style = n;
-            return true;
-        }
-        return false;
-    }
 } // namespace
 
 bool ResolveSfxName(const std::string& entry_name, int& type, int& style) {
     std::string_view path(entry_name);
-    if (const auto sp = path.find(kSoundsPrefix); sp != std::string_view::npos)
-        path.remove_prefix(sp + kSoundsPrefix.size());
-    else if (path.find('/') != std::string_view::npos)
-        path = Basename(path);
+    /* 允许 Content/Sounds/ 或任意 .../Sounds/ 前缀；其它情况退回文件名 */
+    if (const auto sp = path.find("Sounds/"); sp != std::string_view::npos)
+        path.remove_prefix(sp + 7);
+    path = Basename(path);
 
     const std::string_view base = StripExt(path);
     if (base.empty()) return false;
 
-    /* 1) 精确名字表 */
-    if (const auto it = NameToId().find(base); it != NameToId().end()) {
-        type = it->second; style = -1; return true;
+    /* 1) 归一化名字表（小写+去符号）：const / 变体字段 / 家族前缀+数字。
+     *    覆盖 Player_Killed、Door_Closed、NPC_Hit_26、Drip_0、Female_Hit_0 等。 */
+    const std::string base_str(base);
+    if (sfx_name_lookup(base_str.c_str(), &type, &style)) return true;
+
+    /* 1b) 归一化后的别名（例如 Door_Opened -> const DoorOpen） */
+    {
+        std::string norm;
+        norm.reserve(base.size());
+        for (const char c: base) {
+            if (c >= 'A' && c <= 'Z') norm.push_back(static_cast<char>(c + 32));
+            else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) norm.push_back(c);
+        }
+        if (LookupAlias(norm, type)) { style = -1; return true; }
     }
 
-    /* 2) 变体：Item_11 / NPC_Hit_26 / chester_close_0 */
-    if (TryVariant(base, type, style)) return true;
+    /* 2) sfx_<type>_<style>（该写法不是 SoundID 名字，走数字解析） */
+    if (base.size() > 4 && base.substr(0, 4) == "sfx_")
+        if (ParseDigitsPair(base.substr(4), type, style)) return true;
 
-    /* 3) 去下划线回退：Player_Killed -> PlayerKilled */
-    if (base.find('_') != std::string_view::npos) {
-        std::string compact;
-        compact.reserve(base.size());
-        for (const char c : base) if (c != '_') compact.push_back(c);
-        if (const auto it = NameToId().find(compact); it != NameToId().end()) {
-            type = it->second; style = -1; return true;
-        }
-    }
-
-    /* 4) sfx_<type>_<style> */
-    if (constexpr std::string_view sfxPrefix = "sfx_";
-        base.size() > sfxPrefix.size() && base.substr(0, sfxPrefix.size()) == sfxPrefix) {
-        if (ParseDigitsPair(base.substr(sfxPrefix.size()), type, style)) return true;
-        }
-
-    /* 5) 纯数字 */
+    /* 3) 纯数字 / <type>_<style> */
     if (const int t = ParsePureDigits(base); t >= 0) {
-        type = t; style = -1; return true;
+        type = t;
+        style = -1;
+        return true;
     }
-
-    /* 6) <type>_<style> */
-    if (ParseDigitsPair(base, type, style)) return true;
-    return false;
+    return ParseDigitsPair(base, type, style);
 }
